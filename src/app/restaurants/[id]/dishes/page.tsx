@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, use } from "react";
+import React, { useState, useEffect, useCallback, useRef, use } from "react";
 import { useRouter } from "next/navigation";
 import { 
   Plus, 
@@ -11,8 +11,11 @@ import {
   Edit2,
   Settings,
   Loader2,
-  ArrowLeft
+  ArrowLeft,
+  X,
+  Download
 } from "lucide-react";
+import { QRCodeCanvas } from "qrcode.react";
 import { supabase } from "@/lib/supabase";
 
 interface Restaurant {
@@ -39,6 +42,8 @@ export default function MenuManagementPage({ params }: { params: Promise<{ id: s
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
   const [dishes, setDishes] = useState<Dish[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [qrDish, setQrDish] = useState<Dish | null>(null);
+  const qrRef = useRef<HTMLCanvasElement>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -58,6 +63,28 @@ export default function MenuManagementPage({ params }: { params: Promise<{ id: s
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  const getQRUrl = (dishId: string) => {
+    if (typeof window !== "undefined") {
+      return `${window.location.origin}/dish/${dishId}`;
+    }
+    return `/dish/${dishId}`;
+  };
+
+  const handleDownloadQR = () => {
+    if (!qrDish) return;
+    // The QRCodeCanvas renders into a <canvas> element inside a wrapper div.
+    // We need to find the actual canvas element.
+    const wrapperDiv = document.getElementById("qr-canvas-wrapper");
+    const canvas = wrapperDiv?.querySelector("canvas");
+    if (!canvas) return;
+
+    const url = canvas.toDataURL("image/png");
+    const link = document.createElement("a");
+    link.download = `VisionDine_QR_${qrDish.name.replace(/\s+/g, "_")}.png`;
+    link.href = url;
+    link.click();
+  };
 
   if (isLoading) {
     return (
@@ -191,7 +218,10 @@ export default function MenuManagementPage({ params }: { params: Promise<{ id: s
                         </div>
                       </td>
                       <td className="px-2 py-4">
-                        <button className="h-8 w-8 rounded-full flex items-center justify-center hover:bg-gray-100 text-[#64748B] transition-colors">
+                        <button 
+                          onClick={() => setQrDish(dish)}
+                          className="h-8 w-8 rounded-full flex items-center justify-center hover:bg-blue-50 text-blue-500 border border-blue-200 transition-colors"
+                        >
                           <QrCode className="h-4 w-4" />
                         </button>
                       </td>
@@ -208,6 +238,66 @@ export default function MenuManagementPage({ params }: { params: Promise<{ id: s
           </div>
         </div>
       </main>
+
+      {/* ══════════════════════════════════════════════════════════ */}
+      {/* ══  QR Code Modal  ══════════════════════════════════════ */}
+      {/* ══════════════════════════════════════════════════════════ */}
+      {qrDish && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setQrDish(null)}>
+          <div 
+            className="bg-white rounded-3xl shadow-2xl w-[420px] max-w-[90vw] overflow-hidden animate-slide-up"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between p-8 pb-4">
+              <div>
+                <h3 className="text-lg font-bold text-[#0F172A]">{qrDish.name}</h3>
+                <p className="text-xs text-[#94A3B8] mt-1">Scan to preview in AR</p>
+              </div>
+              <button 
+                onClick={() => setQrDish(null)}
+                className="h-8 w-8 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center transition-colors"
+              >
+                <X className="h-4 w-4 text-[#475569]" />
+              </button>
+            </div>
+
+            {/* QR Code */}
+            <div className="flex flex-col items-center px-8 py-6">
+              <div id="qr-canvas-wrapper" className="p-6 bg-white rounded-2xl border border-gray-100 shadow-inner">
+                <QRCodeCanvas
+                  value={getQRUrl(qrDish.id)}
+                  size={200}
+                  bgColor="#ffffff"
+                  fgColor="#0F172A"
+                  level="H"
+                  includeMargin={false}
+                />
+              </div>
+              <p className="text-[10px] text-[#94A3B8] mt-4 text-center font-mono break-all max-w-[280px]">
+                {getQRUrl(qrDish.id)}
+              </p>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="flex items-center gap-3 p-8 pt-4">
+              <button 
+                onClick={() => setQrDish(null)}
+                className="flex-1 h-12 bg-gray-100 hover:bg-gray-200 text-[#0F172A] rounded-xl text-sm font-semibold transition-colors"
+              >
+                Close
+              </button>
+              <button 
+                onClick={handleDownloadQR}
+                className="flex-1 h-12 bg-[#0F172A] hover:bg-black text-white rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-colors"
+              >
+                <Download className="h-4 w-4" />
+                Download QR
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import React from "react";
 import { supabase } from "@/lib/supabase";
-import ARExperience from "@/components/ar/ARExperience";
+import MobileARViewer from "@/components/ar/MobileARViewer";
 import { notFound } from "next/navigation";
 
 export default async function DishARPage({ params }: { params: Promise<{ id: string }> }) {
@@ -25,7 +25,7 @@ export default async function DishARPage({ params }: { params: Promise<{ id: str
   }
 
   return (
-    <ARExperience 
+    <MobileARViewer 
       dish={dish} 
       restaurant={dish.restaurant} 
     />
