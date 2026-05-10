@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import { Camera, Share2, Loader2, X, UtensilsCrossed, Video, Image as ImageIcon, Sparkles } from "lucide-react";
 
 interface MobileARViewerProps {
@@ -19,358 +19,378 @@ interface MobileARViewerProps {
   isFallback?: boolean;
 }
 
-type ARStatus = "loading" | "ready" | "ar-active" | "ar-unavailable";
+const FALLBACK_MODEL = "/models/default_dish.glb";
 
 export default function MobileARViewer({ dish, restaurant, isFallback }: MobileARViewerProps) {
   const modelViewerRef = useRef<any>(null);
-  const [status, setStatus] = useState<ARStatus>("loading");
+  const [phase, setPhase] = useState<"loading" | "welcome" | "active">("loading");
   const [isCapturing, setIsCapturing] = useState(false);
-  const [arMode, setArMode] = useState<string>("checking");
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // ── Load model-viewer only on client ──
+  // Resolve the model URL with fallback
+  const modelSrc = dish.model_3d_url || FALLBACK_MODEL;
+
+  // ── Load model-viewer on client only ──
   useEffect(() => {
-    import("@google/model-viewer").then(() => {
-      detectARCapability();
-    });
+    import("@google/model-viewer");
+
+    // Force transparent backgrounds on html and body
+    document.documentElement.style.background = "transparent";
+    document.body.style.background = "transparent";
+
+    return () => {
+      document.documentElement.style.background = "";
+      document.body.style.background = "";
+    };
   }, []);
 
-  // ── Detect AR capability for this device ──
-  const detectARCapability = async () => {
-    try {
-      const nav = navigator as any;
-      const ua = navigator.userAgent;
-
-      // iOS → Quick Look
-      if (/iphone|ipad|ipod/i.test(ua)) {
-        setArMode("quick-look");
-        return;
-      }
-
-      // Android → Scene Viewer
-      if (/android/i.test(ua)) {
-        setArMode("scene-viewer");
-        return;
-      }
-
-      // Desktop/Other → check WebXR
-      if (nav.xr) {
-        const supported = await nav.xr.isSessionSupported("immersive-ar");
-        setArMode(supported ? "webxr" : "3d-only");
-      } else {
-        setArMode("3d-only");
-      }
-    } catch {
-      setArMode("3d-only");
-    }
-  };
-
-  // ── Handle model loaded ──
+  // ── Model loaded → show welcome screen ──
   const handleModelLoad = () => {
-    setStatus("ready");
+    setPhase("welcome");
   };
 
-  // ── Launch AR via user gesture (required by browsers) ──
-  const launchAR = () => {
+  // ── User gesture: Launch AR ──
+  const launchExperience = () => {
     const mv = modelViewerRef.current;
-    if (!mv) return;
+    setPhase("active");
 
-    try {
-      // model-viewer's activateAR() method triggers the native AR flow
-      if (typeof mv.activateAR === "function") {
+    if (mv && typeof mv.activateAR === "function") {
+      try {
         mv.activateAR();
-        setStatus("ar-active");
+      } catch (err) {
+        console.warn("AR activation not available on this device:", err);
       }
-    } catch (err) {
-      console.error("AR activation failed:", err);
     }
   };
 
-  // ── Shutter: Capture the live 3D canvas ──
-  const captureScene = async () => {
+  // ════════════════════════════════════════════
+  // ═══  Photo Capture  ═══════════════════════
+  // ════════════════════════════════════════════
+  const capturePhoto = async () => {
     const mv = modelViewerRef.current;
     if (!mv || typeof mv.toBlob !== "function") return;
-
     setIsCapturing(true);
 
     try {
-      // 1. Capture the current model-viewer frame
       const blob: Blob = await mv.toBlob({ mimeType: "image/png", idealAspect: true });
-
-      // 2. Draw onto a canvas for watermarking
       const bitmap = await createImageBitmap(blob);
+
       const canvas = document.createElement("canvas");
       canvas.width = bitmap.width;
       canvas.height = bitmap.height;
       const ctx = canvas.getContext("2d")!;
       ctx.drawImage(bitmap, 0, 0);
 
-      // 3. Watermark: restaurant logo at 30% opacity (with text fallback)
-      if (restaurant.logo_url) {
-        try {
-          const logo = await loadImage(restaurant.logo_url);
-          const logoW = canvas.width * 0.18;
-          const logoH = (logo.height / logo.width) * logoW;
-          ctx.globalAlpha = 0.3;
-          ctx.drawImage(logo, (canvas.width - logoW) / 2, 30, logoW, logoH);
-          ctx.globalAlpha = 1;
-        } catch {
-          drawTextWatermark(ctx, canvas.width, canvas.height);
-        }
-      } else {
-        drawTextWatermark(ctx, canvas.width, canvas.height);
-      }
+      // Watermark
+      applyWatermark(ctx, canvas.width, canvas.height);
 
-      // 4. Convert to blob for sharing or download
-      const finalBlob = await new Promise<Blob>((resolve) => {
-        canvas.toBlob((b) => resolve(b!), "image/png");
-      });
+      const finalBlob = await canvasToBlob(canvas);
 
-      // 5. Try native share first (Instagram/social), fall back to download
+      // Try native share (Instagram etc.) first
       if (navigator.share && navigator.canShare) {
         const file = new File([finalBlob], `VisionDine_${dish.name.replace(/\s+/g, "_")}.png`, { type: "image/png" });
-        const shareData = { files: [file], title: `${dish.name} — Vision Dine AR`, text: `Check out ${dish.name} in AR!` };
-
-        if (navigator.canShare(shareData)) {
-          await navigator.share(shareData);
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({ files: [file], title: `${dish.name} — Vision Dine AR` });
           setIsCapturing(false);
           return;
         }
       }
 
-      // Fallback: direct download
-      const url = URL.createObjectURL(finalBlob);
-      const link = document.createElement("a");
-      link.download = `VisionDine_${dish.name.replace(/\s+/g, "_")}_${Date.now()}.png`;
-      link.href = url;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-
+      // Fallback: download
+      downloadBlob(finalBlob, `VisionDine_${dish.name.replace(/\s+/g, "_")}_${Date.now()}.png`);
     } catch (err) {
-      console.error("Capture failed:", err);
+      console.error("Photo capture failed:", err);
     } finally {
       setIsCapturing(false);
     }
   };
 
-  // ── Helper: Load an image via promise ──
-  const loadImage = (src: string): Promise<HTMLImageElement> => {
-    return new Promise((resolve, reject) => {
-      const img = new window.Image();
-      img.crossOrigin = "anonymous";
-      img.onload = () => resolve(img);
-      img.onerror = reject;
-      img.src = src;
-    });
+  // ════════════════════════════════════════════
+  // ═══  Video Capture (Long Press)  ══════════
+  // ════════════════════════════════════════════
+  const startRecording = useCallback(() => {
+    const mv = modelViewerRef.current;
+    if (!mv) return;
+
+    try {
+      // Get the internal canvas from model-viewer's shadow DOM
+      const canvas = mv.shadowRoot?.querySelector("canvas") as HTMLCanvasElement | null;
+      if (!canvas) {
+        console.warn("Could not access model-viewer canvas for recording");
+        return;
+      }
+
+      const stream = canvas.captureStream(30); // 30fps
+      const recorder = new MediaRecorder(stream, { mimeType: "video/webm; codecs=vp9" });
+
+      recordedChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = () => {
+        const videoBlob = new Blob(recordedChunksRef.current, { type: "video/webm" });
+        downloadBlob(videoBlob, `VisionDine_${dish.name.replace(/\s+/g, "_")}_${Date.now()}.webm`);
+        setIsRecording(false);
+      };
+
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      console.error("Video recording failed to start:", err);
+    }
+  }, [dish.name]);
+
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+  }, []);
+
+  // Long press handlers for the shutter button
+  const handleShutterDown = () => {
+    longPressTimerRef.current = setTimeout(() => {
+      startRecording();
+    }, 500); // 500ms = long press threshold
   };
 
-  // ── Helper: Text watermark fallback ──
-  const drawTextWatermark = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
-    ctx.globalAlpha = 0.3;
-    ctx.fillStyle = "#B8960C";
-    ctx.font = `bold ${Math.max(16, Math.floor(w * 0.035))}px sans-serif`;
-    ctx.textAlign = "center";
-    ctx.fillText("VISION DINE", w / 2, 50);
-    ctx.font = `${Math.max(10, Math.floor(w * 0.02))}px sans-serif`;
-    ctx.fillText(restaurant.name, w / 2, 50 + Math.floor(w * 0.04));
-    ctx.globalAlpha = 1;
-  };
+  const handleShutterUp = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
 
-  // ── Share link handler ──
-  const handleShareLink = async () => {
-    if (navigator.share) {
-      try {
-        await navigator.share({
-          title: `${dish.name} — Vision Dine AR`,
-          text: `Check out ${dish.name} in AR from ${restaurant.name}!`,
-          url: window.location.href,
-        });
-      } catch { /* user cancelled */ }
+    if (isRecording) {
+      stopRecording();
     } else {
-      await navigator.clipboard.writeText(window.location.href);
+      // Short tap → photo
+      capturePhoto();
     }
   };
 
-  // ── Generate the .usdz URL from the .glb URL ──
-  const getUsdzUrl = () => {
-    if (!dish.model_3d_url) return undefined;
-    return dish.model_3d_url.replace(/\.glb$/i, ".usdz");
+  // ════════════════════════════════════════════
+  // ═══  Helpers  ═════════════════════════════
+  // ════════════════════════════════════════════
+  const applyWatermark = (ctx: CanvasRenderingContext2D, w: number, h: number) => {
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = "#B8960C";
+    ctx.font = `bold ${Math.max(14, Math.floor(w * 0.03))}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillText("VISION DINE", w / 2, 40);
+    ctx.font = `${Math.max(10, Math.floor(w * 0.018))}px sans-serif`;
+    ctx.fillText(restaurant.name, w / 2, 40 + Math.floor(w * 0.035));
+    ctx.globalAlpha = 1;
   };
 
-  // ── Status label ──
-  const getStatusLabel = () => {
-    if (status === "loading") return "Loading 3D Model...";
-    if (status === "ar-active") return "AR Scan Active";
-    switch (arMode) {
-      case "quick-look": return "iOS AR Ready";
-      case "scene-viewer": return "Android AR Ready";
-      case "webxr": return "WebXR Ready";
-      default: return "3D Preview Mode";
+  const canvasToBlob = (canvas: HTMLCanvasElement): Promise<Blob> =>
+    new Promise((resolve) => canvas.toBlob((b) => resolve(b!), "image/png"));
+
+  const downloadBlob = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleShareLink = async () => {
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: `${dish.name} — Vision Dine AR`, url: window.location.href });
+      } catch { /* cancelled */ }
+    } else {
+      await navigator.clipboard.writeText(window.location.href);
     }
   };
 
   const ModelViewerElement = "model-viewer" as any;
 
   return (
-    <div
-      className="relative h-[100dvh] w-full overflow-hidden flex flex-col"
-      style={{ backgroundColor: "transparent" }}
-    >
-      {/* ── 3D Model Viewer (Full Screen — transparent for camera feed) ── */}
-      <div className="absolute inset-0 z-0" style={{ backgroundColor: "transparent" }}>
+    <div className="fixed inset-0 overflow-hidden" style={{ background: "transparent" }}>
 
-        {status === "loading" && (
-          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black gap-4">
-            <Loader2 className="h-8 w-8 text-[#B8960C] animate-spin" />
-            <p className="text-[10px] font-bold tracking-[0.3em] uppercase text-white/40">
-              {getStatusLabel()}
+      {/* ── Model Viewer: Full-screen, fully transparent ── */}
+      <ModelViewerElement
+        ref={modelViewerRef}
+        src={modelSrc}
+        ar
+        ar-modes="webxr scene-viewer quick-look"
+        ar-scale="auto"
+        camera-controls
+        touch-action="none"
+        auto-rotate
+        shadow-intensity="1"
+        exposure="1"
+        environment-image="neutral"
+        interaction-prompt="none"
+        onLoad={handleModelLoad}
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          background: "transparent",
+          "--poster-color": "transparent",
+          zIndex: 0,
+        } as React.CSSProperties}
+      >
+        <button slot="ar-button" style={{ display: "none" }} />
+      </ModelViewerElement>
+
+      {/* ═══════════════════════════════════════════════ */}
+      {/* ═══  Phase: Loading  ═════════════════════════ */}
+      {/* ═══════════════════════════════════════════════ */}
+      {phase === "loading" && (
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/95">
+          <Loader2 className="h-10 w-10 text-[#B8960C] animate-spin mb-6" />
+          <p className="text-[11px] font-bold tracking-[0.4em] uppercase text-white/30">
+            Loading Experience...
+          </p>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════ */}
+      {/* ═══  Phase: Welcome (Pre-AR Gesture)  ════════ */}
+      {/* ═══════════════════════════════════════════════ */}
+      {phase === "welcome" && (
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm">
+          {/* Brand */}
+          <div className="mb-10">
+            <h1 className="text-[#B8960C] text-[13px] font-bold tracking-[0.5em] uppercase text-center">Vision Dine</h1>
+            <p className="text-white/20 text-[10px] tracking-[0.3em] uppercase text-center mt-2">Augmented Reality Menu</p>
+          </div>
+
+          {/* Dish Info */}
+          <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6 mb-10 max-w-[280px] text-center">
+            <UtensilsCrossed className="h-6 w-6 text-[#B8960C] mx-auto mb-3" />
+            <h2 className="text-white text-lg font-bold mb-1">{dish.name}</h2>
+            <p className="text-white/40 text-xs leading-relaxed">
+              {dish.description || "Tap below to view this dish in your space."}
             </p>
-            {isFallback && (
-              <p className="text-[9px] text-orange-400/60 mt-1">Demo Mode — Default Model</p>
-            )}
           </div>
-        )}
 
-        <ModelViewerElement
-          ref={modelViewerRef}
-          src={dish.model_3d_url}
-          ios-src={getUsdzUrl()}
-          ar
-          ar-modes="scene-viewer quick-look webxr"
-          ar-scale="auto"
-          camera-controls
-          touch-action="none"
-          auto-rotate
-          shadow-intensity="1.5"
-          exposure="1.2"
-          environment-image="neutral"
-          interaction-prompt="auto"
-          onLoad={handleModelLoad}
-          style={{
-            width: "100%",
-            height: "100%",
-            backgroundColor: "transparent",
-            "--poster-color": "transparent",
-          } as React.CSSProperties}
-        >
-          {/* 
-            HIDDEN native AR button — we trigger AR manually via activateAR().
-            This slot must exist for model-viewer to enable AR internally,
-            but we hide it and use our own styled button instead.
-          */}
-          <button slot="ar-button" style={{ display: "none" }} />
-        </ModelViewerElement>
-      </div>
-
-      {/* ═══════════════════════════════════════════════════ */}
-      {/* ═══  Glassmorphism UI Overlay  ═══════════════════ */}
-      {/* ═══════════════════════════════════════════════════ */}
-      <div className="relative z-20 flex flex-col h-full pointer-events-none">
-
-        {/* ── Top Bar: Brand Pill + Close ── */}
-        <div className="flex items-center justify-between px-6 pt-14">
-          <div className="pointer-events-auto px-6 py-3 bg-white/10 backdrop-blur-xl rounded-full border border-white/10 shadow-lg">
-            <span className="text-[#B8960C] text-[11px] font-bold tracking-[0.3em] uppercase">Vision Dine</span>
-          </div>
+          {/* CTA Button — THE user gesture */}
           <button
-            onClick={() => window.history.back()}
-            className="pointer-events-auto h-11 w-11 bg-white/10 backdrop-blur-xl rounded-full flex items-center justify-center border border-white/10 shadow-lg active:scale-90 transition-transform"
+            onClick={launchExperience}
+            className="px-10 py-4 bg-[#B8960C] text-white rounded-full font-bold text-[11px] tracking-[0.25em] uppercase shadow-2xl shadow-[#B8960C]/20 border border-[#d4a80e]/30 flex items-center gap-3 active:scale-95 transition-all"
           >
-            <X className="h-5 w-5 text-white/80" />
+            <Sparkles className="h-4 w-4" />
+            Enter Vision Dine Experience
           </button>
         </div>
+      )}
 
-        {/* ── Spacer ── */}
-        <div className="flex-1 flex items-center justify-center">
-          {/* ── LAUNCH AR BUTTON (user gesture required) ── */}
-          {status === "ready" && arMode !== "3d-only" && (
+      {/* ═══════════════════════════════════════════════ */}
+      {/* ═══  Phase: Active AR Session  ═══════════════ */}
+      {/* ═══════════════════════════════════════════════ */}
+      {phase === "active" && (
+        <div className="absolute inset-0 z-20 flex flex-col pointer-events-none">
+
+          {/* ── Top: Brand Pill + Close ── */}
+          <div className="flex items-center justify-between px-5 pt-14">
+            <div className="pointer-events-auto px-5 py-2.5 bg-white/10 backdrop-blur-xl rounded-full border border-white/10">
+              <span className="text-[#B8960C] text-[10px] font-bold tracking-[0.3em] uppercase">Vision Dine</span>
+            </div>
             <button
-              onClick={launchAR}
-              className="pointer-events-auto px-10 py-4 bg-[#B8960C] hover:bg-[#a0830a] text-white rounded-full font-bold text-[12px] tracking-[0.2em] uppercase shadow-2xl border border-[#d4a80e]/30 flex items-center gap-3 active:scale-95 transition-all animate-bounce"
+              onClick={() => window.history.back()}
+              className="pointer-events-auto h-10 w-10 bg-white/10 backdrop-blur-xl rounded-full flex items-center justify-center border border-white/10 active:scale-90 transition-transform"
             >
-              <Sparkles className="h-5 w-5" />
-              Launch AR Experience
+              <X className="h-4 w-4 text-white/70" />
             </button>
-          )}
-        </div>
+          </div>
 
-        {/* ── Center: Floating Info Card ── */}
-        <div className="px-6 mb-6">
-          {/* Fork Icon */}
-          <div className="flex justify-center mb-4">
-            <div className="h-10 w-10 bg-white/10 backdrop-blur-xl rounded-full border border-white/10 flex items-center justify-center shadow-lg">
-              <UtensilsCrossed className="h-5 w-5 text-[#B8960C]" />
+          {/* ── Spacer ── */}
+          <div className="flex-1" />
+
+          {/* ── Floating Dish Card ── */}
+          <div className="px-5 mb-4">
+            <div className="flex justify-center mb-3">
+              <div className="h-9 w-9 bg-white/10 backdrop-blur-xl rounded-full border border-white/10 flex items-center justify-center">
+                <UtensilsCrossed className="h-4 w-4 text-[#B8960C]" />
+              </div>
+            </div>
+            <div className="pointer-events-auto bg-white/10 backdrop-blur-xl rounded-2xl border border-white/10 p-4 max-w-[260px]">
+              <h2 className="text-[#B8960C] text-[12px] font-bold tracking-[0.15em] uppercase mb-1">{dish.name}</h2>
+              <p className="text-white/50 text-[11px] leading-relaxed">
+                {dish.description || "A signature culinary creation."}
+              </p>
             </div>
           </div>
 
-          {/* Glass Info Card */}
-          <div className="pointer-events-auto bg-white/10 backdrop-blur-xl rounded-2xl border border-white/10 p-5 shadow-2xl max-w-[280px]">
-            <h2 className="text-[#B8960C] text-[13px] font-bold tracking-[0.15em] uppercase mb-1.5">{dish.name}</h2>
-            <p className="text-white/60 text-[12px] leading-relaxed">
-              {dish.description || "A signature culinary creation."}
+          {/* ── Bottom Control Bar ── */}
+          <div className="px-5 pb-3">
+            <div className="pointer-events-auto bg-white/10 backdrop-blur-xl rounded-[2rem] border border-white/10 px-5 py-3">
+              <div className="flex items-center justify-between">
+
+                {/* Dish Thumb */}
+                <div className="h-10 w-10 rounded-full overflow-hidden border-2 border-white/15">
+                  {dish.image_2d_url ? (
+                    <img src={dish.image_2d_url} alt="" className="h-full w-full object-cover" />
+                  ) : (
+                    <div className="h-full w-full bg-white/5 flex items-center justify-center">
+                      <UtensilsCrossed className="h-3.5 w-3.5 text-white/30" />
+                    </div>
+                  )}
+                </div>
+
+                {/* Video */}
+                <button className="h-9 w-9 flex items-center justify-center text-white/30 hover:text-white/70 active:scale-90 transition-all">
+                  <Video className="h-4.5 w-4.5" />
+                </button>
+
+                {/* Shutter — tap for photo, long-press for video */}
+                <button
+                  onPointerDown={handleShutterDown}
+                  onPointerUp={handleShutterUp}
+                  onPointerLeave={() => {
+                    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+                    if (isRecording) stopRecording();
+                  }}
+                  disabled={isCapturing}
+                  className="relative h-[64px] w-[64px] rounded-full flex items-center justify-center group disabled:opacity-50"
+                >
+                  <div className={`absolute inset-0 rounded-full border-[3px] ${isRecording ? 'border-red-500 animate-pulse' : 'border-white/25'} transition-colors`} />
+                  <div className={`h-[52px] w-[52px] rounded-full backdrop-blur-sm border-2 flex items-center justify-center group-active:scale-90 transition-all ${isRecording ? 'bg-red-500/20 border-red-500/60' : 'bg-white/5 border-[#B8960C]/50'}`}>
+                    {isCapturing ? (
+                      <Loader2 className="h-5 w-5 text-[#B8960C] animate-spin" />
+                    ) : isRecording ? (
+                      <div className="h-5 w-5 bg-red-500 rounded-sm" /> 
+                    ) : (
+                      <Camera className="h-5 w-5 text-[#B8960C]" />
+                    )}
+                  </div>
+                </button>
+
+                {/* Share */}
+                <button
+                  onClick={handleShareLink}
+                  className="h-9 w-9 flex items-center justify-center text-white/30 hover:text-white/70 active:scale-90 transition-all"
+                >
+                  <Share2 className="h-4.5 w-4.5" />
+                </button>
+
+                {/* Gallery */}
+                <button className="h-9 w-9 flex items-center justify-center text-white/30 hover:text-white/70 active:scale-90 transition-all">
+                  <ImageIcon className="h-4.5 w-4.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* ── Status ── */}
+          <div className="py-2 text-center">
+            <p className="text-[8px] font-bold tracking-[0.4em] uppercase text-white/20">
+              {isRecording ? "● Recording" : "AR Scan Active"}
             </p>
           </div>
         </div>
-
-        {/* ── Bottom: Control Bar ── */}
-        <div className="px-6 pb-4">
-          <div className="pointer-events-auto bg-white/10 backdrop-blur-xl rounded-[2rem] border border-white/10 shadow-2xl px-6 py-4">
-            <div className="flex items-center justify-between">
-
-              {/* Dish Thumbnail */}
-              <div className="h-11 w-11 rounded-full overflow-hidden border-2 border-white/20 shadow-lg">
-                {dish.image_2d_url ? (
-                  <img src={dish.image_2d_url} alt={dish.name} className="h-full w-full object-cover" />
-                ) : (
-                  <div className="h-full w-full bg-white/10 flex items-center justify-center">
-                    <UtensilsCrossed className="h-4 w-4 text-white/40" />
-                  </div>
-                )}
-              </div>
-
-              {/* Video Icon */}
-              <button className="h-10 w-10 flex items-center justify-center text-white/40 hover:text-white/80 active:scale-90 transition-all">
-                <Video className="h-5 w-5" />
-              </button>
-
-              {/* ── Shutter Button (Center) ── */}
-              <button
-                onClick={captureScene}
-                disabled={isCapturing || status === "loading"}
-                className="relative h-[68px] w-[68px] rounded-full flex items-center justify-center group disabled:opacity-50"
-              >
-                <div className="absolute inset-0 rounded-full border-[3px] border-white/30" />
-                <div className="h-14 w-14 rounded-full bg-white/10 backdrop-blur-sm border-2 border-[#B8960C]/60 flex items-center justify-center group-active:scale-90 transition-transform">
-                  {isCapturing ? (
-                    <Loader2 className="h-6 w-6 text-[#B8960C] animate-spin" />
-                  ) : (
-                    <Camera className="h-6 w-6 text-[#B8960C]" />
-                  )}
-                </div>
-              </button>
-
-              {/* Share Icon */}
-              <button
-                onClick={handleShareLink}
-                className="h-10 w-10 flex items-center justify-center text-white/40 hover:text-white/80 active:scale-90 transition-all"
-              >
-                <Share2 className="h-5 w-5" />
-              </button>
-
-              {/* Gallery Icon */}
-              <button className="h-10 w-10 flex items-center justify-center text-white/40 hover:text-white/80 active:scale-90 transition-all">
-                <ImageIcon className="h-5 w-5" />
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* ── Bottom Status Label ── */}
-        <div className="py-3 text-center">
-          <p className="text-[9px] font-bold tracking-[0.4em] uppercase text-white/30">{getStatusLabel()}</p>
-        </div>
-      </div>
+      )}
     </div>
   );
 }
