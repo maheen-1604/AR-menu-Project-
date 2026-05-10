@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { Camera, Share2, Loader2, X, UtensilsCrossed, Video, Image as ImageIcon } from "lucide-react";
+import { Camera, Share2, Loader2, X, UtensilsCrossed, Video, Image as ImageIcon, Sparkles } from "lucide-react";
 
 interface MobileARViewerProps {
   dish: {
@@ -16,57 +16,76 @@ interface MobileARViewerProps {
     name: string;
     logo_url: string;
   };
+  isFallback?: boolean;
 }
 
-type ARStatus = "loading" | "ready" | "ar-active" | "no-ar";
+type ARStatus = "loading" | "ready" | "ar-active" | "ar-unavailable";
 
-export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps) {
+export default function MobileARViewer({ dish, restaurant, isFallback }: MobileARViewerProps) {
   const modelViewerRef = useRef<any>(null);
   const [status, setStatus] = useState<ARStatus>("loading");
   const [isCapturing, setIsCapturing] = useState(false);
-  const [arSupport, setArSupport] = useState<string>("checking");
+  const [arMode, setArMode] = useState<string>("checking");
 
   // ── Load model-viewer only on client ──
   useEffect(() => {
     import("@google/model-viewer").then(() => {
-      // Check AR support after model-viewer is loaded
-      checkARSupport();
+      detectARCapability();
     });
   }, []);
 
-  // ── Check AR Support ──
-  const checkARSupport = async () => {
+  // ── Detect AR capability for this device ──
+  const detectARCapability = async () => {
     try {
-      // Check WebXR (cast to any — WebXR types not in default TS lib)
       const nav = navigator as any;
-      if (nav.xr) {
-        const supported = await nav.xr.isSessionSupported("immersive-ar");
-        if (supported) {
-          setArSupport("webxr");
-          return;
-        }
+      const ua = navigator.userAgent;
+
+      // iOS → Quick Look
+      if (/iphone|ipad|ipod/i.test(ua)) {
+        setArMode("quick-look");
+        return;
       }
 
-      // Check platform fallbacks
-      const ua = navigator.userAgent.toLowerCase();
+      // Android → Scene Viewer
       if (/android/i.test(ua)) {
-        setArSupport("scene-viewer");
-      } else if (/iphone|ipad|ipod/i.test(ua)) {
-        setArSupport("quick-look");
+        setArMode("scene-viewer");
+        return;
+      }
+
+      // Desktop/Other → check WebXR
+      if (nav.xr) {
+        const supported = await nav.xr.isSessionSupported("immersive-ar");
+        setArMode(supported ? "webxr" : "3d-only");
       } else {
-        setArSupport("3d-only");
+        setArMode("3d-only");
       }
     } catch {
-      setArSupport("3d-only");
+      setArMode("3d-only");
     }
   };
 
-  // ── Handle model load ──
+  // ── Handle model loaded ──
   const handleModelLoad = () => {
     setStatus("ready");
   };
 
-  // ── Shutter: Capture the live model-viewer canvas ──
+  // ── Launch AR via user gesture (required by browsers) ──
+  const launchAR = () => {
+    const mv = modelViewerRef.current;
+    if (!mv) return;
+
+    try {
+      // model-viewer's activateAR() method triggers the native AR flow
+      if (typeof mv.activateAR === "function") {
+        mv.activateAR();
+        setStatus("ar-active");
+      }
+    } catch (err) {
+      console.error("AR activation failed:", err);
+    }
+  };
+
+  // ── Shutter: Capture the live 3D canvas ──
   const captureScene = async () => {
     const mv = modelViewerRef.current;
     if (!mv || typeof mv.toBlob !== "function") return;
@@ -75,7 +94,7 @@ export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps
 
     try {
       // 1. Capture the current model-viewer frame
-      const blob: Blob = await mv.toBlob({ mimeType: "image/png", idealAspect: false });
+      const blob: Blob = await mv.toBlob({ mimeType: "image/png", idealAspect: true });
 
       // 2. Draw onto a canvas for watermarking
       const bitmap = await createImageBitmap(blob);
@@ -85,7 +104,7 @@ export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps
       const ctx = canvas.getContext("2d")!;
       ctx.drawImage(bitmap, 0, 0);
 
-      // 3. Watermark: Restaurant logo at 30% opacity, or text fallback
+      // 3. Watermark: restaurant logo at 30% opacity (with text fallback)
       if (restaurant.logo_url) {
         try {
           const logo = await loadImage(restaurant.logo_url);
@@ -95,29 +114,42 @@ export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps
           ctx.drawImage(logo, (canvas.width - logoW) / 2, 30, logoW, logoH);
           ctx.globalAlpha = 1;
         } catch {
-          // Fallback to text watermark if logo fails (CORS)
           drawTextWatermark(ctx, canvas.width, canvas.height);
         }
       } else {
         drawTextWatermark(ctx, canvas.width, canvas.height);
       }
 
-      // 4. Trigger download
-      canvas.toBlob((finalBlob) => {
-        if (!finalBlob) return;
-        const url = URL.createObjectURL(finalBlob);
-        const link = document.createElement("a");
-        link.download = `VisionDine_${dish.name.replace(/\s+/g, "_")}_${Date.now()}.png`;
-        link.href = url;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(url);
-        setIsCapturing(false);
-      }, "image/png");
+      // 4. Convert to blob for sharing or download
+      const finalBlob = await new Promise<Blob>((resolve) => {
+        canvas.toBlob((b) => resolve(b!), "image/png");
+      });
+
+      // 5. Try native share first (Instagram/social), fall back to download
+      if (navigator.share && navigator.canShare) {
+        const file = new File([finalBlob], `VisionDine_${dish.name.replace(/\s+/g, "_")}.png`, { type: "image/png" });
+        const shareData = { files: [file], title: `${dish.name} — Vision Dine AR`, text: `Check out ${dish.name} in AR!` };
+
+        if (navigator.canShare(shareData)) {
+          await navigator.share(shareData);
+          setIsCapturing(false);
+          return;
+        }
+      }
+
+      // Fallback: direct download
+      const url = URL.createObjectURL(finalBlob);
+      const link = document.createElement("a");
+      link.download = `VisionDine_${dish.name.replace(/\s+/g, "_")}_${Date.now()}.png`;
+      link.href = url;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
 
     } catch (err) {
       console.error("Capture failed:", err);
+    } finally {
       setIsCapturing(false);
     }
   };
@@ -145,8 +177,8 @@ export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps
     ctx.globalAlpha = 1;
   };
 
-  // ── Share handler ──
-  const handleShare = async () => {
+  // ── Share link handler ──
+  const handleShareLink = async () => {
     if (navigator.share) {
       try {
         await navigator.share({
@@ -154,25 +186,26 @@ export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps
           text: `Check out ${dish.name} in AR from ${restaurant.name}!`,
           url: window.location.href,
         });
-      } catch {
-        // User cancelled
-      }
+      } catch { /* user cancelled */ }
     } else {
       await navigator.clipboard.writeText(window.location.href);
     }
   };
 
+  // ── Generate the .usdz URL from the .glb URL ──
+  const getUsdzUrl = () => {
+    if (!dish.model_3d_url) return undefined;
+    return dish.model_3d_url.replace(/\.glb$/i, ".usdz");
+  };
+
   // ── Status label ──
   const getStatusLabel = () => {
-    switch (status) {
-      case "loading": return "Initializing AR Engine...";
-      case "ready": {
-        if (arSupport === "webxr") return "WebXR Ready — Tap to Place";
-        if (arSupport === "scene-viewer") return "Android AR Ready";
-        if (arSupport === "quick-look") return "iOS AR Ready";
-        return "3D Preview Mode";
-      }
-      case "ar-active": return "AR Scan Active";
+    if (status === "loading") return "Loading 3D Model...";
+    if (status === "ar-active") return "AR Scan Active";
+    switch (arMode) {
+      case "quick-look": return "iOS AR Ready";
+      case "scene-viewer": return "Android AR Ready";
+      case "webxr": return "WebXR Ready";
       default: return "3D Preview Mode";
     }
   };
@@ -180,20 +213,21 @@ export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps
   const ModelViewerElement = "model-viewer" as any;
 
   return (
-    <div className="relative h-[100dvh] w-full overflow-hidden flex flex-col" style={{ backgroundColor: "transparent" }}>
-      
-      {/* ── 3D Model Viewer (Full Screen — transparent bg for camera feed) ── */}
-      <div className="absolute inset-0 z-0">
+    <div
+      className="relative h-[100dvh] w-full overflow-hidden flex flex-col"
+      style={{ backgroundColor: "transparent" }}
+    >
+      {/* ── 3D Model Viewer (Full Screen — transparent for camera feed) ── */}
+      <div className="absolute inset-0 z-0" style={{ backgroundColor: "transparent" }}>
+
         {status === "loading" && (
           <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black gap-4">
             <Loader2 className="h-8 w-8 text-[#B8960C] animate-spin" />
             <p className="text-[10px] font-bold tracking-[0.3em] uppercase text-white/40">
               {getStatusLabel()}
             </p>
-            {arSupport !== "checking" && arSupport !== "webxr" && (
-              <p className="text-[9px] text-white/20 mt-2">
-                Fallback: {arSupport === "scene-viewer" ? "Scene Viewer" : arSupport === "quick-look" ? "Quick Look" : "3D Only"}
-              </p>
+            {isFallback && (
+              <p className="text-[9px] text-orange-400/60 mt-1">Demo Mode — Default Model</p>
             )}
           </div>
         )}
@@ -201,9 +235,9 @@ export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps
         <ModelViewerElement
           ref={modelViewerRef}
           src={dish.model_3d_url}
-          ios-src={dish.model_3d_url?.replace(".glb", ".usdz")}
+          ios-src={getUsdzUrl()}
           ar
-          ar-modes="webxr scene-viewer quick-look"
+          ar-modes="scene-viewer quick-look webxr"
           ar-scale="auto"
           camera-controls
           touch-action="none"
@@ -217,17 +251,15 @@ export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps
             width: "100%",
             height: "100%",
             backgroundColor: "transparent",
-            // Ensure the model-viewer canvas is never blocked
             "--poster-color": "transparent",
           } as React.CSSProperties}
         >
-          {/* Native AR Button — styled as a premium floating pill */}
-          <button
-            slot="ar-button"
-            className="absolute bottom-36 left-1/2 -translate-x-1/2 px-8 py-3.5 bg-[#B8960C] text-white rounded-full font-bold text-[11px] tracking-[0.2em] uppercase shadow-2xl border border-[#d4a80e]/30 animate-bounce"
-          >
-            ✦ Place in your space
-          </button>
+          {/* 
+            HIDDEN native AR button — we trigger AR manually via activateAR().
+            This slot must exist for model-viewer to enable AR internally,
+            but we hide it and use our own styled button instead.
+          */}
+          <button slot="ar-button" style={{ display: "none" }} />
         </ModelViewerElement>
       </div>
 
@@ -235,13 +267,13 @@ export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps
       {/* ═══  Glassmorphism UI Overlay  ═══════════════════ */}
       {/* ═══════════════════════════════════════════════════ */}
       <div className="relative z-20 flex flex-col h-full pointer-events-none">
-        
+
         {/* ── Top Bar: Brand Pill + Close ── */}
         <div className="flex items-center justify-between px-6 pt-14">
           <div className="pointer-events-auto px-6 py-3 bg-white/10 backdrop-blur-xl rounded-full border border-white/10 shadow-lg">
             <span className="text-[#B8960C] text-[11px] font-bold tracking-[0.3em] uppercase">Vision Dine</span>
           </div>
-          <button 
+          <button
             onClick={() => window.history.back()}
             className="pointer-events-auto h-11 w-11 bg-white/10 backdrop-blur-xl rounded-full flex items-center justify-center border border-white/10 shadow-lg active:scale-90 transition-transform"
           >
@@ -250,7 +282,18 @@ export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps
         </div>
 
         {/* ── Spacer ── */}
-        <div className="flex-1" />
+        <div className="flex-1 flex items-center justify-center">
+          {/* ── LAUNCH AR BUTTON (user gesture required) ── */}
+          {status === "ready" && arMode !== "3d-only" && (
+            <button
+              onClick={launchAR}
+              className="pointer-events-auto px-10 py-4 bg-[#B8960C] hover:bg-[#a0830a] text-white rounded-full font-bold text-[12px] tracking-[0.2em] uppercase shadow-2xl border border-[#d4a80e]/30 flex items-center gap-3 active:scale-95 transition-all animate-bounce"
+            >
+              <Sparkles className="h-5 w-5" />
+              Launch AR Experience
+            </button>
+          )}
+        </div>
 
         {/* ── Center: Floating Info Card ── */}
         <div className="px-6 mb-6">
@@ -274,7 +317,7 @@ export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps
         <div className="px-6 pb-4">
           <div className="pointer-events-auto bg-white/10 backdrop-blur-xl rounded-[2rem] border border-white/10 shadow-2xl px-6 py-4">
             <div className="flex items-center justify-between">
-              
+
               {/* Dish Thumbnail */}
               <div className="h-11 w-11 rounded-full overflow-hidden border-2 border-white/20 shadow-lg">
                 {dish.image_2d_url ? (
@@ -292,14 +335,12 @@ export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps
               </button>
 
               {/* ── Shutter Button (Center) ── */}
-              <button 
+              <button
                 onClick={captureScene}
                 disabled={isCapturing || status === "loading"}
                 className="relative h-[68px] w-[68px] rounded-full flex items-center justify-center group disabled:opacity-50"
               >
-                {/* Outer ring */}
                 <div className="absolute inset-0 rounded-full border-[3px] border-white/30" />
-                {/* Inner circle */}
                 <div className="h-14 w-14 rounded-full bg-white/10 backdrop-blur-sm border-2 border-[#B8960C]/60 flex items-center justify-center group-active:scale-90 transition-transform">
                   {isCapturing ? (
                     <Loader2 className="h-6 w-6 text-[#B8960C] animate-spin" />
@@ -310,8 +351,8 @@ export default function MobileARViewer({ dish, restaurant }: MobileARViewerProps
               </button>
 
               {/* Share Icon */}
-              <button 
-                onClick={handleShare}
+              <button
+                onClick={handleShareLink}
                 className="h-10 w-10 flex items-center justify-center text-white/40 hover:text-white/80 active:scale-90 transition-all"
               >
                 <Share2 className="h-5 w-5" />
