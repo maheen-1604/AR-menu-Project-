@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+/* ── Vision Dine — Light Premium Theme ── */
+
+:root {
+  --background: #FAFAFA;
+  --foreground: #111111;
+  --accent: #B8960C;
+  --surface: #FAF8F4;
+  --card-bg: #FFFFFF;
+  --text-primary: #111111;
+  --text-secondary: #666666;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-accent: #B8960C;
+  --color-surface: #FAF8F4;
+  
+  --font-sans: var(--font-inter);
+  --font-serif: var(--font-playfair);
+
+  --animate-fade-in: fadeIn 0.5s ease-out forwards;
+  --animate-slide-up: slideUp 0.4s ease-out forwards;
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes slideUp {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-inter), sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, .font-serif {
+  font-family: var(--font-playfair), serif;
+}
