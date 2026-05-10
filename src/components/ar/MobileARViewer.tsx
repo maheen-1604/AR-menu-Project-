@@ -213,6 +213,7 @@ export default function MobileARViewer({ dish, restaurant, isFallback }: MobileA
             exposure="1"
             environment-image="neutral"
             interaction-prompt="none"
+            scale={`${dish.scale_factor} ${dish.scale_factor} ${dish.scale_factor}`}
             style={{
               position: "absolute",
               inset: 0,

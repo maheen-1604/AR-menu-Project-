@@ -52,7 +52,10 @@ export default async function DishARPage({ params }: { params: Promise<{ id: str
       restaurant = FALLBACK_RESTAURANT;
       isFallback = true;
     } else {
-      dish = data;
+      dish = {
+        ...data,
+        scale_factor: data.scale_factor ?? 1.0
+      };
       restaurant = data.restaurant;
     }
   } catch (err) {
