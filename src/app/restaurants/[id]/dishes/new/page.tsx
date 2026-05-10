@@ -39,7 +39,7 @@ export default function AddNewDishPage({ params }: { params: Promise<{ id: strin
 
   // AR Scaling State
   const [scaleFactor, setScaleFactor] = useState(1.0);
-  const [baseDimensions, setBaseDimensions] = useState({ width: 0, height: 0, length: 0 });
+  const [baseSize, setBaseSize] = useState({ x: 0, y: 0, z: 0 });
   const modelViewerRef = useRef<any>(null);
 
   // Submission State
@@ -72,23 +72,12 @@ export default function AddNewDishPage({ params }: { params: Promise<{ id: strin
   // AR Dimension Logic — capture base dimensions once on model load
   const handleModelLoad = () => {
     if (modelViewerRef.current) {
-      // model-viewer's getDimensions() returns {x, y, z} in meters
       const size = modelViewerRef.current.getDimensions();
       if (size) {
-        // Store BASE dimensions (meters → cm), scaleFactor multiplied at render time
-        setBaseDimensions({
-          width: size.x * 100,
-          height: size.y * 100,
-          length: size.z * 100
-        });
+        setBaseSize(size);
       }
     }
   };
-
-  // Computed display dimensions = base × scaleFactor
-  const displayWidth = (baseDimensions.width * scaleFactor).toFixed(1);
-  const displayHeight = (baseDimensions.height * scaleFactor).toFixed(1);
-  const displayLength = (baseDimensions.length * scaleFactor).toFixed(1);
 
   const uploadFile = async (file: File, path: string) => {
     const fileExt = file.name.split('.').pop();
@@ -389,21 +378,21 @@ export default function AddNewDishPage({ params }: { params: Promise<{ id: strin
                         <span className="h-4 w-4 bg-blue-100 flex items-center justify-center rounded text-blue-600 text-[10px]">↔</span>
                         Width (Side to Side)
                       </span>
-                      <span className="text-sm font-bold text-[#0F172A]">{displayWidth} cm</span>
+                      <span className="text-sm font-bold text-[#0F172A]">{(baseSize.x * scaleFactor * 100).toFixed(1)} cm</span>
                     </div>
                     <div className="flex justify-between items-center pb-4 border-b border-gray-200">
                       <span className="text-sm text-[#64748B] flex items-center gap-2">
                         <span className="h-4 w-4 bg-green-100 flex items-center justify-center rounded text-green-600 text-[10px]">↕</span>
                         Height (Bottom to Top)
                       </span>
-                      <span className="text-sm font-bold text-[#0F172A]">{displayHeight} cm</span>
+                      <span className="text-sm font-bold text-[#0F172A]">{(baseSize.y * scaleFactor * 100).toFixed(1)} cm</span>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-sm text-[#64748B] flex items-center gap-2">
                         <span className="h-4 w-4 bg-purple-100 flex items-center justify-center rounded text-purple-600 text-[10px]">↗</span>
                         Length (Front to Back)
                       </span>
-                      <span className="text-sm font-bold text-[#0F172A]">{displayLength} cm</span>
+                      <span className="text-sm font-bold text-[#0F172A]">{(baseSize.z * scaleFactor * 100).toFixed(1)} cm</span>
                     </div>
                   </div>
                 </div>

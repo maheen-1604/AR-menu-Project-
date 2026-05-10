@@ -47,17 +47,28 @@ export default function MobileARViewer({ dish, restaurant, isFallback }: MobileA
     };
   }, [dish.model_3d_url, modelSrc]);
 
+  const [showIosWarning, setShowIosWarning] = useState(false);
+
   // ── TASK 2: "TAP TO ENTER AR" — the user gesture that unblocks everything ──
   const handleStart = () => {
     setStarted(true);
 
-    // Small delay to let model-viewer render, then try to launch native AR
-    setTimeout(() => {
-      const mv = modelViewerRef.current;
-      if (mv && typeof mv.activateAR === "function") {
-        try { mv.activateAR(); } catch (e) { console.warn("AR activation skipped:", e); }
+    // Explicit synchronous call to bypass browser's camera block
+    const mv = modelViewerRef.current;
+    if (mv && typeof mv.activateAR === "function") {
+      try { 
+        mv.activateAR(); 
+      } catch (e) { 
+        console.warn("AR activation skipped:", e); 
       }
-    }, 300);
+    }
+
+    // iOS Fallback Warning: if on iOS and no usdz is provided, WebXR might not trigger camera
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
+    if (isIOS) {
+      setShowIosWarning(true);
+      setTimeout(() => setShowIosWarning(false), 5000);
+    }
   };
 
   // ════════════════════════════════════════
@@ -196,41 +207,49 @@ export default function MobileARViewer({ dish, restaurant, isFallback }: MobileA
       )}
 
       {/* ═══════════════════════════════════════════════ */}
-      {/* ═══  MODEL-VIEWER (visible only after tap)  ══ */}
+      {/* ═══  MODEL-VIEWER (Always in DOM for sync trigger)  ══ */}
       {/* ═══════════════════════════════════════════════ */}
-      {started && (
-        <>
-          <ModelViewerElement
-            ref={modelViewerRef}
-            src={modelSrc}
-            ar
-            ar-modes="webxr scene-viewer quick-look"
-            ar-scale="auto"
-            camera-controls
-            touch-action="none"
-            auto-rotate
-            shadow-intensity="1"
-            exposure="1"
-            environment-image="neutral"
-            interaction-prompt="none"
-            scale={`${dish.scale_factor} ${dish.scale_factor} ${dish.scale_factor}`}
-            style={{
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
-              background: "transparent",
-              "--poster-color": "transparent",
-              zIndex: 0,
-            } as React.CSSProperties}
-          >
-            <button slot="ar-button" style={{ display: "none" }} />
-          </ModelViewerElement>
+      <ModelViewerElement
+        ref={modelViewerRef}
+        src={modelSrc}
+        ar
+        ar-modes="webxr scene-viewer quick-look"
+        ar-scale="auto"
+        camera-controls
+        touch-action="none"
+        auto-rotate
+        shadow-intensity="1"
+        exposure="1"
+        environment-image="neutral"
+        interaction-prompt="none"
+        scale={`${dish.scale_factor} ${dish.scale_factor} ${dish.scale_factor}`}
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          background: "transparent",
+          "--poster-color": "transparent",
+          zIndex: 0,
+          opacity: started ? 1 : 0, // Visually hidden until started
+          pointerEvents: started ? "auto" : "none"
+        } as React.CSSProperties}
+      >
+        <button slot="ar-button" style={{ display: "none" }} />
+      </ModelViewerElement>
 
-          {/* ═══════════════════════════════════════════ */}
-          {/* ═══  GLASSMORPHISM UI (z-50)  ════════════ */}
-          {/* ═══════════════════════════════════════════ */}
-          <div className="absolute inset-0 z-50 flex flex-col pointer-events-none">
+      {/* iOS Warning Toast */}
+      {showIosWarning && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 bg-black/80 backdrop-blur-md text-white text-[10px] uppercase tracking-widest px-6 py-3 rounded-full border border-white/20 animate-fade-in text-center whitespace-nowrap">
+          iOS Detected: Native AR may be limited.
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════ */}
+      {/* ═══  GLASSMORPHISM UI (z-50)  ════════════ */}
+      {/* ═══════════════════════════════════════════ */}
+      {started && (
+        <div className="absolute inset-0 z-50 flex flex-col pointer-events-none">
 
             {/* Top: Brand + Close */}
             <div className="flex items-center justify-between px-5 pt-14">
@@ -320,7 +339,6 @@ export default function MobileARViewer({ dish, restaurant, isFallback }: MobileA
               </p>
             </div>
           </div>
-        </>
       )}
     </div>
   );
